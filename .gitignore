@@ -13,3 +13,7 @@ query_logs.db
 
 # OS files
 .DS_Store
+
+# Ignore large PDFs exceeding GitHub's file size limits
+documents/finance/DSR_Vol_1_Civil.pdf
+documents/finance/DSR_Vol_2_Civil.pdf

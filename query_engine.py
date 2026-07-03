@@ -35,9 +35,27 @@ _chain_cache = {}
 def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None):
     """Initialize and return the hybrid conversational RAG chain."""
     global _chain_cache
+    import time
+    
     cache_key = (model_name, api_base, api_model)
+    
+    # Check if last_ingest timestamp exists to handle hot-reloading
+    last_ingest_time = 0.0
+    last_ingest_path = os.path.join(db_dir, "last_ingest.txt")
+    if os.path.exists(last_ingest_path):
+        try:
+            with open(last_ingest_path, "r") as f:
+                last_ingest_time = float(f.read().strip())
+        except Exception:
+            pass
+            
     if cache_key in _chain_cache:
-        return _chain_cache[cache_key]
+        cached_entry = _chain_cache[cache_key]
+        if cached_entry["timestamp"] >= last_ingest_time:
+            return cached_entry["chain"]
+        else:
+            # Stale cache detected, delete it
+            del _chain_cache[cache_key]
         
     if not os.path.exists(db_dir):
         raise FileNotFoundError(f"Chroma DB directory not found at {db_dir}. Please run 'python ingest.py' first.")
@@ -112,7 +130,10 @@ def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None):
         combine_docs_chain_kwargs={"prompt": prompt}
     )
     
-    _chain_cache[cache_key] = qa_chain
+    _chain_cache[cache_key] = {
+        "chain": qa_chain,
+        "timestamp": time.time()
+    }
     return qa_chain
 
 def query_rag(query_text, model_name="gemma2:9b", chat_history=None, api_base=None, api_model=None):
