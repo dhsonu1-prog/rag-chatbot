@@ -142,15 +142,14 @@ with st.sidebar:
     db_exists = os.path.exists(db_dir)
     if db_exists:
         st.success("✅ Database loaded successfully")
-        # Try to count files
-        pdf_count = len([f for f in os.listdir(workspace_dir) if f.endswith('.pdf')])
-        # Count files in subdirectories too
-        for root, _, files in os.walk(workspace_dir):
-            if 'chroma_db' in root or '.git' in root:
-                continue
-            pdf_count += len([f for f in files if f.endswith('.pdf')])
+        # Count files dynamically
+        pdf_count = 0
+        exclude_dirs = {'.git', 'venv', '.venv', 'chroma_db', 'node_modules', '__pycache__'}
+        for root, dirs, files in os.walk(workspace_dir):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            pdf_count += len([f for f in files if f.lower().endswith('.pdf')])
             
-        st.info(f"📁 Source PDFs found: **115**")
+        st.info(f"📁 Source PDFs found: **{pdf_count}**")
     else:
         st.warning("⚠️ Database not found")
         st.markdown("""
