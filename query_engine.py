@@ -32,11 +32,12 @@ Helpful Answer:"""
 # Cache to avoid rebuilding the chain on every query
 _chain_cache = {}
 
-def get_rag_chain(model_name="gemma2:9b"):
+def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None):
     """Initialize and return the hybrid conversational RAG chain."""
     global _chain_cache
-    if model_name in _chain_cache:
-        return _chain_cache[model_name]
+    cache_key = (model_name, api_base, api_model)
+    if cache_key in _chain_cache:
+        return _chain_cache[cache_key]
         
     if not os.path.exists(db_dir):
         raise FileNotFoundError(f"Chroma DB directory not found at {db_dir}. Please run 'python ingest.py' first.")
@@ -85,8 +86,17 @@ def get_rag_chain(model_name="gemma2:9b"):
         weights=[0.5, 0.5]
     )
     
-    # 6. Load local Ollama LLM using modern OllamaLLM
-    llm = OllamaLLM(model=model_name)
+    # 6. Load local LLM (Ollama) or custom OpenAI-compatible endpoint (vLLM)
+    if api_base:
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(
+            openai_api_key="none",
+            openai_api_base=api_base,
+            model_name=api_model or "/mnt/ai_storage/models/Qwen3.5-397B-A17B-FP8-dynamic",
+            temperature=0.0
+        )
+    else:
+        llm = OllamaLLM(model=model_name)
     
     # 7. Define prompt
     prompt = PromptTemplate(
@@ -102,16 +112,16 @@ def get_rag_chain(model_name="gemma2:9b"):
         combine_docs_chain_kwargs={"prompt": prompt}
     )
     
-    _chain_cache[model_name] = qa_chain
+    _chain_cache[cache_key] = qa_chain
     return qa_chain
 
-def query_rag(query_text, model_name="gemma2:9b", chat_history=None):
+def query_rag(query_text, model_name="gemma2:9b", chat_history=None, api_base=None, api_model=None):
     """Query the local conversational RAG pipeline and return the answer and source documents."""
     if chat_history is None:
         chat_history = []
         
     try:
-        chain = get_rag_chain(model_name=model_name)
+        chain = get_rag_chain(model_name=model_name, api_base=api_base, api_model=api_model)
         response = chain.invoke({"question": query_text, "chat_history": chat_history})
         
         answer = response["answer"]

@@ -112,13 +112,28 @@ with st.sidebar:
     st.image("https://img.icons8.com/isometric/512/database.png", width=80)
     st.markdown("### ⚙️ Pipeline Settings")
     
-    # Model configuration
-    model_choice = st.selectbox(
-        "Choose Local LLM (Ollama)",
-        ["gemma2:9b", "gemma2:2b", "llama3.1:8b", "qwen2:7b", "llama3"],
+    # LLM Source configuration
+    llm_source = st.radio(
+        "Select LLM Source",
+        ["Local Ollama", "Remote vLLM Server"],
         index=0,
-        help="Make sure you have pulled this model locally using: 'ollama pull <model_name>'"
+        help="Use a local Ollama model or point to the remote vLLM model at 172.16.172.4:3003"
     )
+    
+    api_base = None
+    api_model = None
+    model_choice = "gemma2:9b"
+    
+    if llm_source == "Local Ollama":
+        model_choice = st.selectbox(
+            "Choose Local LLM (Ollama)",
+            ["gemma2:9b", "gemma2:2b", "llama3.1:8b", "qwen2:7b", "llama3"],
+            index=0,
+            help="Make sure you have pulled this model locally using: 'ollama pull <model_name>'"
+        )
+    else:
+        api_base = st.text_input("vLLM Base URL", value="http://172.16.172.4:3003/v1/")
+        api_model = st.text_input("Model ID", value="/mnt/ai_storage/models/Qwen3.5-397B-A17B-FP8-dynamic")
     
     st.markdown("---")
     st.markdown("### 📊 Database Status")
@@ -201,7 +216,13 @@ if user_query := st.chat_input("Ask a question about Civil Services rules (e.g.,
             sources_placeholder = st.empty()
             
             with st.spinner("Searching local documents and generating response..."):
-                answer, sources = query_rag(user_query, model_name=model_choice, chat_history=chat_history)
+                answer, sources = query_rag(
+                    user_query, 
+                    model_name=model_choice, 
+                    chat_history=chat_history,
+                    api_base=api_base,
+                    api_model=api_model
+                )
                 
             response_placeholder.markdown(answer)
             
