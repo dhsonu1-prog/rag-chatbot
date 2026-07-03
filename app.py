@@ -10,7 +10,7 @@ from query_engine import query_rag
 
 # Constants
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
-db_dir = os.path.join(workspace_dir, "chroma_db")
+db_dir = os.path.join(workspace_dir, "qdrant_db")
 
 # Page configuration
 st.set_page_config(
@@ -86,7 +86,7 @@ def format_source_citation(filepath):
     date_str = ""
     if date_match:
         raw_date = date_match.group(1).strip()
-        raw_date = re.sub(r"\.(pdf|docx|html|txt)$", "", raw_date, flags=re.IGNORECASE)
+        raw_date = re.sub(r"\.(pdf|docx|html|txt|png|jpg|jpeg|tiff)$", "", raw_date, flags=re.IGNORECASE)
         date_str = f" ({raw_date})"
     
     # Extract parent directory category
@@ -95,7 +95,7 @@ def format_source_citation(filepath):
     
     # Strip date suffix and extension
     display_name = re.sub(r"\s+dated\s+.*", "", filename, flags=re.IGNORECASE)
-    display_name = re.sub(r"\.pdf$", "", display_name, flags=re.IGNORECASE)
+    display_name = re.sub(r"\.(pdf|png|jpg|jpeg|tiff)$", "", display_name, flags=re.IGNORECASE)
     
     return f"📄 {category}**{display_name}**{date_str}"
 
@@ -135,6 +135,22 @@ with st.sidebar:
         api_base = st.text_input("vLLM Base URL", value="http://172.16.172.4:3003/v1/")
         api_model = st.text_input("Model ID", value="/mnt/ai_storage/models/Qwen3.5-397B-A17B-FP8-dynamic")
     
+    st.markdown("### 🎛️ Hybrid Search (RRF)")
+    vector_weight = st.slider(
+        "Vector (Semantic) Weight",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.5,
+        step=0.05,
+        help="Higher values focus more on semantic meaning. Lower values focus more on exact keyword matching."
+    )
+    bm25_weight = round(1.0 - vector_weight, 2)
+    st.caption(f"BM25 (Keyword) Weight: **{bm25_weight}**")
+    
+    st.markdown("### 🚀 Reranker Settings")
+    use_reranker = st.toggle("Enable Reranking (Qwen3-VL)", value=True, help="Use Qwen3-VL-Reranker-2B to rerank candidates on your GPU.")
+    top_n_rerank = st.slider("Top N Documents to Keep", min_value=1, max_value=10, value=5, help="Number of reranked documents to send as context to the LLM.")
+    
     st.markdown("---")
     st.markdown("### 📊 Database Status")
     
@@ -144,12 +160,19 @@ with st.sidebar:
         st.success("✅ Database loaded successfully")
         # Count files dynamically
         pdf_count = 0
-        exclude_dirs = {'.git', 'venv', '.venv', 'chroma_db', 'node_modules', '__pycache__'}
+        image_count = 0
+        exclude_dirs = {'.git', 'venv', '.venv', 'qdrant_db', 'node_modules', '__pycache__'}
+        image_extensions = ('.png', '.jpg', '.jpeg', '.tiff')
         for root, dirs, files in os.walk(workspace_dir):
             dirs[:] = [d for d in dirs if d not in exclude_dirs]
-            pdf_count += len([f for f in files if f.lower().endswith('.pdf')])
+            for f in files:
+                ext = f.lower()
+                if ext.endswith('.pdf'):
+                    pdf_count += 1
+                elif ext.endswith(image_extensions):
+                    image_count += 1
             
-        st.info(f"📁 Source PDFs found: **{pdf_count}**")
+        st.info(f"📁 PDFs: **{pdf_count}** | Images: **{image_count}**")
     else:
         st.warning("⚠️ Database not found")
         st.markdown("""
@@ -220,7 +243,11 @@ if user_query := st.chat_input("Ask a question about Civil Services rules (e.g.,
                     model_name=model_choice, 
                     chat_history=chat_history,
                     api_base=api_base,
-                    api_model=api_model
+                    api_model=api_model,
+                    vector_weight=vector_weight,
+                    bm25_weight=bm25_weight,
+                    use_reranker=use_reranker,
+                    top_n_rerank=top_n_rerank
                 )
                 
             response_placeholder.markdown(answer)

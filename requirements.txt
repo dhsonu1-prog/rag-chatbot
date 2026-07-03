@@ -1,8 +1,13 @@
 langchain
 langchain-community
 langchain-huggingface
-chromadb
+qdrant-client
 pypdf
 streamlit
 sentence-transformers
 python-dotenv
+beautifulsoup4
+pymupdf
+langchain-qdrant
+langchain-ollama
+accelerate

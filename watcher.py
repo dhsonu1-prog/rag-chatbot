@@ -7,24 +7,26 @@ import sys
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
 monitor_dir = os.path.join(workspace_dir, "documents")
 
-def find_pdfs(root_dir):
-    """Find all PDF files recursively, ignoring virtual environments, git, or db folders."""
-    exclude_dirs = {'.git', 'venv', '.venv', 'chroma_db', 'node_modules', '__pycache__'}
-    pdf_files = []
+SUPPORTED_EXTENSIONS = ('.pdf', '.png', '.jpg', '.jpeg', '.tiff')
+
+def find_documents(root_dir):
+    """Find all supported files recursively, ignoring virtual environments, git, or db folders."""
+    exclude_dirs = {'.git', 'venv', '.venv', 'qdrant_db', 'node_modules', '__pycache__'}
+    doc_files = []
     
     for root, dirs, files in os.walk(root_dir):
         # Prune excluded directories in-place
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for file in files:
-            if file.lower().endswith('.pdf'):
-                pdf_files.append(os.path.join(root, file))
+            if file.lower().endswith(SUPPORTED_EXTENSIONS):
+                doc_files.append(os.path.join(root, file))
                 
-    return pdf_files
+    return doc_files
 
-def get_pdf_state(pdf_paths):
-    """Retrieve the current mtime and size state of all PDF files."""
+def get_document_state(doc_paths):
+    """Retrieve the current mtime and size state of all supported files."""
     state = {}
-    for path in pdf_paths:
+    for path in doc_paths:
         try:
             stat = os.stat(path)
             state[path] = (stat.st_mtime, stat.st_size)
@@ -53,23 +55,23 @@ def run_ingestion():
 
 def main():
     print("=" * 60)
-    print("        📚 PDF Document Watcher Daemon initialized")
+    print("        📚 Document Watcher Daemon initialized")
     print(f"        Monitoring: {monitor_dir}")
     print("        Sleep interval: 5 seconds")
     print("=" * 60)
     
     # Initialize initial state
-    pdf_paths = find_pdfs(monitor_dir)
-    last_state = get_pdf_state(pdf_paths)
-    print(f"[Watcher] Monitoring {len(pdf_paths)} initial PDF documents...")
+    doc_paths = find_documents(monitor_dir)
+    last_state = get_document_state(doc_paths)
+    print(f"[Watcher] Monitoring {len(doc_paths)} initial documents...")
     
     try:
         while True:
             time.sleep(5)
             
             # Scan current state
-            current_paths = find_pdfs(monitor_dir)
-            current_state = get_pdf_state(current_paths)
+            current_paths = find_documents(monitor_dir)
+            current_state = get_document_state(current_paths)
             
             # Detect changes
             changed = False

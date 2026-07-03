@@ -2,35 +2,149 @@ import os
 import glob
 import json
 import time
+import base64
+import requests
+import fitz  # PyMuPDF for converting PDF pages to images
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_chroma import Chroma
+from langchain_qdrant import Qdrant
+from qdrant_client import QdrantClient
+from qdrant_client import models as qdrant_models
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.documents import Document
 
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
-db_dir = os.path.join(workspace_dir, "chroma_db")
+db_dir = os.path.join(workspace_dir, "qdrant_db")
 
-def find_pdfs(root_dir):
-    """Find all PDF files recursively, ignoring virtual environments or db folders."""
-    exclude_dirs = {'.git', 'venv', '.venv', 'chroma_db', 'node_modules', '__pycache__'}
-    pdf_files = []
+# Supported file formats
+SUPPORTED_EXTENSIONS = ('.pdf', '.png', '.jpg', '.jpeg', '.tiff')
+
+def find_documents(root_dir):
+    """Find all supported files recursively, ignoring virtual environments or db folders."""
+    exclude_dirs = {'.git', 'venv', '.venv', 'qdrant_db', 'node_modules', '__pycache__'}
+    doc_files = []
     
     for root, dirs, files in os.walk(root_dir):
         # Prune excluded directories in-place
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for file in files:
-            if file.lower().endswith('.pdf'):
-                pdf_files.append(os.path.join(root, file))
+            if file.lower().endswith(SUPPORTED_EXTENSIONS):
+                doc_files.append(os.path.join(root, file))
                 
-    return pdf_files
+    return doc_files
+
+# Keep find_pdfs function for backward compatibility
+def find_pdfs(root_dir):
+    return find_documents(root_dir)
+
+def ocr_page_pymupdf(pdf_path, page_num):
+    """Render a single PDF page to an image and run OCR on it using gemma-4-vision."""
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc.load_page(page_num)
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = pix.tobytes("jpeg")
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+    except Exception as e:
+        print(f"  [OCR Error] Failed to render PDF page {page_num} of {pdf_path}: {e}")
+        return ""
+
+    url = "http://172.16.172.4:3001/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "model": "gemma-4-vision",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Perform OCR on this page. Extract all readable text verbatim. Maintain layout and structure as much as possible. Respond ONLY with the extracted text, do not explain or add commentary."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_b64}"
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 1500,
+        "temperature": 0.0
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        if response.status_code == 200:
+            res_json = response.json()
+            return res_json["choices"][0]["message"]["content"]
+        else:
+            print(f"  [OCR Error] API returned status {response.status_code}: {response.text}")
+    except Exception as e:
+        print(f"  [OCR Error] Connection failed during page OCR: {e}")
+    return ""
+
+def ocr_image(image_path):
+    """Run OCR on a standalone image file using gemma-4-vision."""
+    try:
+        with open(image_path, "rb") as f:
+            img_bytes = f.read()
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+    except Exception as e:
+        print(f"  [OCR Error] Failed to read image {image_path}: {e}")
+        return ""
+
+    mime_type = "image/jpeg"
+    ext = image_path.lower()
+    if ext.endswith(".png"):
+        mime_type = "image/png"
+    elif ext.endswith(".tiff") or ext.endswith(".tif"):
+        mime_type = "image/tiff"
+
+    url = "http://172.16.172.4:3001/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "model": "gemma-4-vision",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Perform OCR on this image. Extract all readable text verbatim. Respond ONLY with the extracted text, do not explain or add commentary."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{img_b64}"
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 1500,
+        "temperature": 0.0
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        if response.status_code == 200:
+            res_json = response.json()
+            return res_json["choices"][0]["message"]["content"]
+        else:
+            print(f"  [OCR Error] API returned status {response.status_code}: {response.text}")
+    except Exception as e:
+        print(f"  [OCR Error] Connection failed during image OCR: {e}")
+    return ""
 
 def main():
-    print(f"Scanning workspace for PDF documents in: {workspace_dir}...")
-    pdf_paths = find_pdfs(workspace_dir)
-    print(f"Found {len(pdf_paths)} PDF files to index.")
+    print(f"Scanning workspace for documents (PDFs and images) in: {workspace_dir}...")
+    doc_paths = find_documents(workspace_dir)
+    print(f"Found {len(doc_paths)} documents to index.")
     
-    if not pdf_paths:
-        print("No PDFs found. Exiting.")
+    if not doc_paths:
+        print("No documents found. Exiting.")
         return
         
     registry_path = os.path.join(db_dir, "file_registry.json")
@@ -46,7 +160,7 @@ def main():
             
     # Calculate current state of files on disk
     current_state = {}
-    for path in pdf_paths:
+    for path in doc_paths:
         try:
             stat = os.stat(path)
             rel_path = os.path.relpath(path, workspace_dir)
@@ -76,29 +190,59 @@ def main():
     print(f"  - New or Modified: {len(added_or_modified)}")
     print(f"  - Removed: {len(deleted)}")
     
-    print("\nLoading local embedding model ('all-MiniLM-L6-v2')...")
+    print("\nLoading local embedding model ('Qwen/Qwen3-VL-Embedding-2B') on GPU...")
     embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={'device': 'cpu'}
+        model_name="Qwen/Qwen3-VL-Embedding-2B",
+        model_kwargs={'device': 'cuda'}
     )
     
-    print(f"Opening Chroma DB at: {db_dir}...")
-    db = Chroma(
-        persist_directory=db_dir,
-        embedding_function=embeddings
+    print(f"Opening Qdrant DB at: {db_dir}...")
+    client = QdrantClient(path=db_dir)
+    try:
+        if not client.collection_exists("government_rules"):
+            client.create_collection(
+                collection_name="government_rules",
+                vectors_config=qdrant_models.VectorParams(
+                    size=2048,
+                    distance=qdrant_models.Distance.COSINE
+                )
+            )
+            print("  Created new Qdrant collection: 'government_rules'")
+    except Exception as e:
+        pass
+
+    db = Qdrant(
+        client=client,
+        collection_name="government_rules",
+        embeddings=embeddings
     )
     
     # Process deletions & modifications (delete old chunks)
     files_to_remove = deleted + added_or_modified
     if files_to_remove:
         print(f"\nRemoving stale chunks from database for {len(files_to_remove)} files...")
-        for rel_path in files_to_remove:
-            try:
-                db.delete(where={"source": rel_path})
-                print(f"  Removed chunks for: {rel_path}")
-            except Exception as e:
-                # delete might fail if collection is empty/new, which is fine
-                pass
+        try:
+            if client.collection_exists("government_rules"):
+                for rel_path in files_to_remove:
+                    try:
+                        client.delete(
+                            collection_name="government_rules",
+                            points_selector=qdrant_models.FilterSelector(
+                                filter=qdrant_models.Filter(
+                                    must=[
+                                        qdrant_models.FieldCondition(
+                                            key="metadata.source",
+                                            match=qdrant_models.MatchValue(value=rel_path)
+                                        )
+                                    ]
+                                )
+                            )
+                        )
+                        print(f"  Removed chunks for: {rel_path}")
+                    except Exception as e:
+                        pass
+        except Exception:
+            pass
                 
     # Process additions & modifications (extract new chunks)
     all_chunks = []
@@ -107,15 +251,40 @@ def main():
     if added_or_modified:
         print(f"\nProcessing {len(added_or_modified)} new/modified files...")
         for idx, rel_path in enumerate(added_or_modified):
-            pdf_path = current_state[rel_path]["abs_path"]
-            parent_dir = os.path.basename(os.path.dirname(pdf_path))
-            filename = os.path.basename(pdf_path)
-            category = parent_dir if os.path.dirname(pdf_path) != workspace_dir else "Root"
+            file_path = current_state[rel_path]["abs_path"]
+            parent_dir = os.path.basename(os.path.dirname(file_path))
+            filename = os.path.basename(file_path)
+            category = parent_dir if os.path.dirname(file_path) != workspace_dir else "Root"
             
             print(f"[{idx+1}/{len(added_or_modified)}] Processing {rel_path}...")
             try:
-                loader = PyPDFLoader(pdf_path)
-                docs = loader.load()
+                docs = []
+                if file_path.lower().endswith('.pdf'):
+                    loader = PyPDFLoader(file_path)
+                    docs = loader.load()
+                    for doc in docs:
+                        page_num = doc.metadata.get('page', 0)
+                        text = doc.page_content.strip()
+                        # If page text is very short/empty, run OCR fallback
+                        if len(text) < 50:
+                            print(f"  [OCR] Low text content detected on page {page_num+1} ({len(text)} chars). Running Vision OCR fallback...")
+                            ocr_text = ocr_page_pymupdf(file_path, page_num)
+                            if ocr_text:
+                                doc.page_content = ocr_text
+                                print(f"  [OCR] Successfully extracted {len(ocr_text)} chars from page {page_num+1}.")
+                            else:
+                                print(f"  [OCR] Failed or empty result for page {page_num+1}.")
+                else:
+                    # Image file
+                    print(f"  [OCR] Image file detected. Running Vision OCR...")
+                    ocr_text = ocr_image(file_path)
+                    if ocr_text:
+                        print(f"  [OCR] Successfully extracted {len(ocr_text)} chars from image.")
+                        doc = Document(page_content=ocr_text, metadata={"page": 0})
+                        docs = [doc]
+                    else:
+                        print(f"  [OCR] Failed or empty result for image.")
+                
                 for doc in docs:
                     doc.metadata['source'] = rel_path
                     doc.metadata['filename'] = filename
@@ -123,20 +292,22 @@ def main():
                     
                 chunks = text_splitter.split_documents(docs)
                 all_chunks.extend(chunks)
+                
+                # Write to DB incrementally in batches of 2000 chunks to prevent memory bloat/OOM
+                if len(all_chunks) >= 2000:
+                    print(f"  Writing batch of {len(all_chunks)} chunks to Qdrant DB...")
+                    db.add_documents(all_chunks)
+                    all_chunks = []
             except Exception as e:
                 print(f"  Error reading {rel_path}: {e}")
                 
-    # Add new chunks to DB in batches
-    if all_chunks:
-        batch_size = 4000
-        print(f"\nAdding {len(all_chunks)} chunks to Chroma DB (batch size: {batch_size})...")
-        for i in range(0, len(all_chunks), batch_size):
-            batch = all_chunks[i:i + batch_size]
-            print(f"  Inserting batch {i // batch_size + 1}/{-(-len(all_chunks) // batch_size)} ({len(batch)} chunks)...")
+        # Write any remaining chunks to Qdrant DB
+        if all_chunks:
+            print(f"  Writing final batch of {len(all_chunks)} chunks to Qdrant DB...")
             try:
-                db.add_documents(batch)
+                db.add_documents(all_chunks)
             except Exception as e:
-                print(f"Error writing batch starting at index {i}: {e}")
+                print(f"Error writing final batch to Qdrant DB: {e}")
                 return
             
     # Update file registry

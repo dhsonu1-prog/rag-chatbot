@@ -8,6 +8,7 @@ __pycache__/
 
 # Local databases and caches
 chroma_db/
+qdrant_db/
 bm25_index.pkl
 query_logs.db
 

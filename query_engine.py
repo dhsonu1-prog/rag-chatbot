@@ -1,6 +1,7 @@
 import os
 import pickle
-from langchain_chroma import Chroma
+from langchain_qdrant import Qdrant
+from qdrant_client import QdrantClient
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import OllamaLLM
 from langchain_classic.chains import ConversationalRetrievalChain
@@ -10,7 +11,7 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_classic.retrievers import EnsembleRetriever
 
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
-db_dir = os.path.join(workspace_dir, "chroma_db")
+db_dir = os.path.join(workspace_dir, "qdrant_db")
 bm25_cache_path = os.path.join(workspace_dir, "bm25_index.pkl")
 
 # Strict, robust prompt template for local RAG
@@ -31,13 +32,63 @@ Helpful Answer:"""
 
 # Cache to avoid rebuilding the chain on every query
 _chain_cache = {}
+_reranker_cache = {}
 
-def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None):
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
+from typing import List
+
+def get_reranker(model_name="Qwen/Qwen3-VL-Reranker-2B"):
+    global _reranker_cache
+    if model_name not in _reranker_cache:
+        print(f"Loading reranker model '{model_name}' on GPU...")
+        from sentence_transformers import CrossEncoder
+        import torch
+        model = CrossEncoder(
+            model_name,
+            automodel_args={"torch_dtype": torch.float16},
+            device="cuda"
+        )
+        _reranker_cache[model_name] = model
+    return _reranker_cache[model_name]
+
+class RerankEnsembleRetriever(BaseRetriever):
+    base_retriever: BaseRetriever
+    use_reranker: bool = True
+    top_n: int = 5
+    
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None
+    ) -> List[Document]:
+        # 1. Retrieve candidates (e.g. get top 20 docs)
+        docs = self.base_retriever.invoke(query)
+        if not self.use_reranker or not docs:
+            return docs[:self.top_n]
+            
+        try:
+            model = get_reranker("Qwen/Qwen3-VL-Reranker-2B")
+            
+            # 2. Score documents
+            scored_docs = []
+            for doc in docs:
+                score = model.predict([query, doc.page_content])
+                scored_docs.append((score, doc))
+                
+            # 3. Sort by score descending and take top_n
+            scored_docs.sort(key=lambda x: x[0], reverse=True)
+            reranked_docs = [doc for score, doc in scored_docs[:self.top_n]]
+            print(f"  [Reranker] Successfully reranked {len(docs)} documents to top {len(reranked_docs)}.")
+            return reranked_docs
+        except Exception as e:
+            print(f"  [Reranker Warning] Reranking failed: {e}. Falling back to default retrieval.")
+            return docs[:self.top_n]
+
+def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None, vector_weight=0.5, bm25_weight=0.5, use_reranker=True, top_n_rerank=5):
     """Initialize and return the hybrid conversational RAG chain."""
     global _chain_cache
     import time
     
-    cache_key = (model_name, api_base, api_model)
+    cache_key = (model_name, api_base, api_model, vector_weight, bm25_weight, use_reranker, top_n_rerank)
     
     # Check if last_ingest timestamp exists to handle hot-reloading
     last_ingest_time = 0.0
@@ -58,40 +109,69 @@ def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None):
             del _chain_cache[cache_key]
         
     if not os.path.exists(db_dir):
-        raise FileNotFoundError(f"Chroma DB directory not found at {db_dir}. Please run 'python ingest.py' first.")
+        raise FileNotFoundError(f"Qdrant DB directory not found at {db_dir}. Please run 'python ingest.py' first.")
         
     # 1. Load local embedding model
     embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={'device': 'cpu'}
+        model_name="Qwen/Qwen3-VL-Embedding-2B",
+        model_kwargs={'device': 'cuda'}
     )
     
-    # 2. Load Chroma DB
-    db = Chroma(
-        persist_directory=db_dir,
-        embedding_function=embeddings
+    # 2. Load Qdrant DB
+    client = QdrantClient(path=db_dir)
+    if not client.collection_exists("government_rules"):
+        raise ValueError(f"The Qdrant collection 'government_rules' does not exist. Please run 'python ingest.py' first.")
+        
+    db = Qdrant(
+        client=client,
+        collection_name="government_rules",
+        embeddings=embeddings
     )
     
-    # 3. Create Vector retriever (k=8)
-    vector_retriever = db.as_retriever(search_kwargs={"k": 8})
+    # 3. Create Vector retriever
+    candidate_k = 20 if use_reranker else 8
+    vector_retriever = db.as_retriever(search_kwargs={"k": candidate_k})
     
-    # 4. Load or build BM25 retriever (k=8)
+    # 4. Load or build BM25 retriever
     bm25_retriever = None
     if os.path.exists(bm25_cache_path):
         try:
             with open(bm25_cache_path, "rb") as f:
                 bm25_retriever = pickle.load(f)
-            # Ensure k is set to 8
-            bm25_retriever.k = 8
+            bm25_retriever.k = candidate_k
         except Exception as e:
             print(f"Warning: Failed to load BM25 cache: {e}. Rebuilding...")
             bm25_retriever = None
             
     if bm25_retriever is None:
-        res = db.get(include=["documents", "metadatas"])
-        docs = [Document(page_content=doc, metadata=meta) for doc, meta in zip(res["documents"], res["metadatas"])]
+        records = []
+        offset = None
+        while True:
+            res_scroll, next_page = client.scroll(
+                collection_name="government_rules",
+                limit=1000,
+                with_payload=True,
+                with_vectors=False,
+                offset=offset
+            )
+            records.extend(res_scroll)
+            if next_page is None:
+                break
+            offset = next_page
+            
+        docs = []
+        for rec in records:
+            payload = rec.payload or {}
+            if "page_content" in payload:
+                docs.append(Document(
+                    page_content=payload["page_content"],
+                    metadata=payload.get("metadata", {})
+                ))
+                
+        if not docs:
+            raise ValueError("The Qdrant database is currently empty. Please run ingestion first using 'python ingest.py'.")
         bm25_retriever = BM25Retriever.from_documents(docs)
-        bm25_retriever.k = 8
+        bm25_retriever.k = candidate_k
         try:
             with open(bm25_cache_path, "wb") as f:
                 pickle.dump(bm25_retriever, f)
@@ -99,9 +179,15 @@ def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None):
             print(f"Warning: Failed to save BM25 cache: {e}")
             
     # 5. Combine into Ensemble (Hybrid) retriever
-    retriever = EnsembleRetriever(
+    ensemble_retriever = EnsembleRetriever(
         retrievers=[bm25_retriever, vector_retriever],
-        weights=[0.5, 0.5]
+        weights=[bm25_weight, vector_weight]
+    )
+    
+    retriever = RerankEnsembleRetriever(
+        base_retriever=ensemble_retriever,
+        use_reranker=use_reranker,
+        top_n=top_n_rerank
     )
     
     # 6. Load local LLM (Ollama) or custom OpenAI-compatible endpoint (vLLM)
@@ -136,13 +222,21 @@ def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None):
     }
     return qa_chain
 
-def query_rag(query_text, model_name="gemma2:9b", chat_history=None, api_base=None, api_model=None):
+def query_rag(query_text, model_name="gemma2:9b", chat_history=None, api_base=None, api_model=None, vector_weight=0.5, bm25_weight=0.5, use_reranker=True, top_n_rerank=5):
     """Query the local conversational RAG pipeline and return the answer and source documents."""
     if chat_history is None:
         chat_history = []
         
     try:
-        chain = get_rag_chain(model_name=model_name, api_base=api_base, api_model=api_model)
+        chain = get_rag_chain(
+            model_name=model_name, 
+            api_base=api_base, 
+            api_model=api_model, 
+            vector_weight=vector_weight, 
+            bm25_weight=bm25_weight,
+            use_reranker=use_reranker,
+            top_n_rerank=top_n_rerank
+        )
         response = chain.invoke({"question": query_text, "chat_history": chat_history})
         
         answer = response["answer"]
