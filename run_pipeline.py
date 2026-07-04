@@ -88,7 +88,10 @@ def main():
     if args.start_server:
         print("\n[Stage 4] Starting Streamlit Chat Server...")
         try:
-            venv_bin = os.path.join(workspace_dir, ".venv", "bin")
+            venv_bin = os.path.join(workspace_dir, "venv", "bin")
+            if not os.path.exists(venv_bin):
+                venv_bin = os.path.join(workspace_dir, ".venv", "bin")
+                
             if os.path.exists(venv_bin):
                 streamlit_cmd = os.path.join(venv_bin, "streamlit")
             else:
