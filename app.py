@@ -181,8 +181,29 @@ with st.sidebar:
             help="Make sure you have pulled this model locally using: 'ollama pull <model_name>'"
         )
     else:
-        api_base = st.text_input("vLLM Base URL", value="http://172.16.172.4:3003/v1/")
-        api_model = st.text_input("Model ID", value="/mnt/ai_storage/models/Qwen3.5-397B-A17B-FP8-dynamic")
+        remote_model_choice = st.selectbox(
+            "Choose Remote LLM",
+            [
+                "Sarvam-105B (Port 3002) [Super Fast]",
+                "Gemma-4-Vision (Port 3001) [Fast Visual/Text QA]",
+                "Qwen-397B (Port 3003) [Heavy Reasoning]"
+            ],
+            index=0,
+            help="Choose the active remote server and port to execute the RAG answer generation."
+        )
+        
+        default_base = "http://172.16.172.4:3002/v1/"
+        default_model = "/mnt/ai_storage/models/sarvam-105b"
+        
+        if "Gemma" in remote_model_choice:
+            default_base = "http://172.16.172.4:3001/v1/"
+            default_model = "gemma-4-vision"
+        elif "Qwen" in remote_model_choice:
+            default_base = "http://172.16.172.4:3003/v1/"
+            default_model = "/mnt/ai_storage/models/Qwen3.5-397B-A17B-FP8-dynamic"
+            
+        api_base = st.text_input("vLLM Base URL", value=default_base)
+        api_model = st.text_input("Model ID", value=default_model)
     
     st.markdown("### 🎛️ Hybrid Search (RRF)")
     vector_weight = st.slider(
