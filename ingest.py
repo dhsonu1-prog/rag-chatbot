@@ -259,7 +259,12 @@ def main():
             try:
                 client.create_payload_index(
                     collection_name="government_rules",
-                    field_name="metadata.category",
+                    field_name="metadata.broad_category",
+                    field_schema=qdrant_models.PayloadSchemaType.KEYWORD
+                )
+                client.create_payload_index(
+                    collection_name="government_rules",
+                    field_name="metadata.subcategory",
                     field_schema=qdrant_models.PayloadSchemaType.KEYWORD
                 )
                 client.create_payload_index(
@@ -267,7 +272,7 @@ def main():
                     field_name="metadata.source",
                     field_schema=qdrant_models.PayloadSchemaType.KEYWORD
                 )
-                print("  Payload indexes created successfully for 'category' and 'source'.")
+                print("  Payload indexes created successfully for 'broad_category', 'subcategory', and 'source'.")
             except Exception as index_err:
                 print(f"  Warning: Could not create payload indexes: {index_err}")
     except Exception as e:
@@ -314,9 +319,18 @@ def main():
         print(f"\nProcessing {len(added_or_modified)} new/modified files...")
         for idx, rel_path in enumerate(added_or_modified):
             file_path = current_state[rel_path]["abs_path"]
-            parent_dir = os.path.basename(os.path.dirname(file_path))
             filename = os.path.basename(file_path)
-            category = parent_dir if os.path.dirname(file_path) != workspace_dir else "Root"
+            
+            # Parse broad_category and subcategory from relative path
+            parts = rel_path.split(os.sep)
+            broad_category = "General"
+            subcategory = "General"
+            
+            if len(parts) >= 3:
+                broad_category = parts[1]
+                subcategory = parts[2]
+            elif len(parts) == 2:
+                broad_category = parts[1]
             
             print(f"[{idx+1}/{len(added_or_modified)}] Processing {rel_path}...")
             try:
@@ -350,7 +364,14 @@ def main():
                 for doc in docs:
                     doc.metadata['source'] = rel_path
                     doc.metadata['filename'] = filename
-                    doc.metadata['category'] = category
+                    doc.metadata['broad_category'] = broad_category
+                    doc.metadata['subcategory'] = subcategory
+                    
+                    # Prepend category and document context to enrich vectors
+                    broad_name = broad_category.split('_', 1)[-1]
+                    sub_name = subcategory.replace('_', ' ')
+                    context_prefix = f"[Category: {broad_name} > {sub_name}] [Document: {filename}]\n\n"
+                    doc.page_content = context_prefix + doc.page_content
                     
                 chunks = text_splitter.split_documents(docs)
                 all_chunks.extend(chunks)

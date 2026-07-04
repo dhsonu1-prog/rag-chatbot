@@ -89,22 +89,88 @@ class QdrantHybridRetriever(BaseRetriever):
     sparse_encoder: HashingSparseEncoder
     collection_name: str = "government_rules"
     top_k: int = 20
+    
+    # Active routing properties (can be updated dynamically)
+    broad_category: str = None
+    subcategory: str = None
+    similarity_threshold: float = 0.70  # Cosine threshold for fallback routing
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None
     ) -> List[Document]:
-        # 1. Generate dense query vector
+        # 1. Generate query vectors
         query_dense = self.embeddings.embed_query(query)
-        
-        # 2. Generate sparse query vector
         query_sparse = self.sparse_encoder.encode(query)
         
-        # 3. Query Qdrant with native prefetch and Fusion.RRF
+        # 2. Build filters dynamically
+        sub_filter = None
+        broad_filter = None
+        
+        if self.subcategory and self.subcategory != "All":
+            sub_filter = qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="metadata.subcategory",
+                        match=qdrant_models.MatchValue(value=self.subcategory)
+                    )
+                ]
+            )
+            
+        if self.broad_category and self.broad_category != "All":
+            broad_filter = qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="metadata.broad_category",
+                        match=qdrant_models.MatchValue(value=self.broad_category)
+                    )
+                ]
+            )
+            
+        # 3. Dynamic Fallback Routing Evaluation
+        active_filter = None
+        routing_level = "Global"
+        
+        if sub_filter:
+            try:
+                # Gauge quality of best semantic match within this specific subcategory
+                test_res = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_dense,
+                    filter=sub_filter,
+                    limit=1
+                ).points
+                
+                best_cosine = test_res[0].score if test_res else 0.0
+                print(f"  [Router] Subcategory '{self.subcategory}' match quality (Cosine): {best_cosine:.4f}")
+                
+                if best_cosine >= self.similarity_threshold:
+                    active_filter = sub_filter
+                    routing_level = f"Subcategory ({self.subcategory})"
+                elif broad_filter:
+                    print(f"  [Router Warning] Match quality below {self.similarity_threshold}. Falling back to Broad Category...")
+                    active_filter = broad_filter
+                    routing_level = f"Broad Category ({self.broad_category})"
+                else:
+                    print(f"  [Router Warning] Match quality below {self.similarity_threshold}. Falling back to Global...")
+                    active_filter = None
+                    routing_level = "Global"
+            except Exception as e:
+                print(f"  [Router Warning] Fallback quality check failed: {e}. Defaulting to subcategory filter.")
+                active_filter = sub_filter
+                routing_level = f"Subcategory ({self.subcategory})"
+        elif broad_filter:
+            active_filter = broad_filter
+            routing_level = f"Broad Category ({self.broad_category})"
+            
+        print(f"  [Router] Executing hybrid query at level: {routing_level}")
+        
+        # 4. Execute the actual pre-filtered hybrid search
         if not query_sparse["indices"]:
-            # Fallback to dense only if no terms are present
+            # Fallback to dense only if no sparse terms are present
             results = self.client.query_points(
                 collection_name=self.collection_name,
                 query=query_dense,
+                filter=active_filter,
                 limit=self.top_k
             ).points
         else:
@@ -115,6 +181,7 @@ class QdrantHybridRetriever(BaseRetriever):
                         qdrant_models.Prefetch(
                             query=query_dense,
                             using="",  # default unnamed dense vector
+                            filter=active_filter,
                             limit=self.top_k * 2
                         ),
                         qdrant_models.Prefetch(
@@ -123,6 +190,7 @@ class QdrantHybridRetriever(BaseRetriever):
                                 values=query_sparse["values"]
                             ),
                             using="sparse-text",
+                            filter=active_filter,
                             limit=self.top_k * 2
                         )
                     ],
@@ -133,14 +201,14 @@ class QdrantHybridRetriever(BaseRetriever):
                 ).points
             except Exception as query_err:
                 print(f"  [Qdrant Hybrid Warning] Hybrid query failed: {query_err}. Falling back to dense vector search.")
-                # Fallback to dense vector if collection doesn't have sparse configured yet
                 results = self.client.query_points(
                     collection_name=self.collection_name,
                     query=query_dense,
+                    filter=active_filter,
                     limit=self.top_k
                 ).points
             
-        # 4. Map results to LangChain Documents
+        # 5. Map results to LangChain Documents
         docs = []
         for point in results:
             payload = point.payload or {}
