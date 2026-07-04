@@ -293,11 +293,15 @@ def main():
                 chunks = text_splitter.split_documents(docs)
                 all_chunks.extend(chunks)
                 
-                # Write to DB incrementally in batches of 2000 chunks to prevent memory bloat/OOM
-                if len(all_chunks) >= 2000:
+                # Write to DB incrementally in batches of 400 chunks to prevent memory bloat/OOM
+                if len(all_chunks) >= 400:
                     print(f"  Writing batch of {len(all_chunks)} chunks to Qdrant DB...")
-                    db.add_documents(all_chunks)
-                    all_chunks = []
+                    try:
+                        db.add_documents(all_chunks)
+                    except Exception as e:
+                        print(f"  Error writing batch to Qdrant DB: {e}")
+                    finally:
+                        all_chunks = []
             except Exception as e:
                 print(f"  Error reading {rel_path}: {e}")
                 
