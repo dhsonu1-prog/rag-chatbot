@@ -253,9 +253,25 @@ def main():
         model_kwargs={'device': 'cuda'}
     )
     
-    print(f"Opening Qdrant DB at: {db_dir}...")
-    client = QdrantClient(path=db_dir)
+    print("Opening Qdrant DB...")
     try:
+        client = QdrantClient(url="http://localhost:6333", timeout=3.0)
+        client.get_collections()
+        print("Connected to standalone Qdrant server at http://localhost:6333")
+    except Exception:
+        print(f"Standalone Qdrant server offline. Falling back to local db path: {db_dir}")
+        client = QdrantClient(path=db_dir)
+    try:
+        # Drop collection if registry is missing to ensure a clean rebuild on the server
+        if not os.path.exists(registry_path):
+            print("No file registry found. Dropping existing collection to start fresh...")
+            try:
+                if client.collection_exists("government_rules"):
+                    client.delete_collection("government_rules")
+                    print("  Deleted existing collection 'government_rules'.")
+            except Exception as e:
+                print(f"  Note: could not delete collection: {e}")
+
         if not client.collection_exists("government_rules"):
             client.create_collection(
                 collection_name="government_rules",

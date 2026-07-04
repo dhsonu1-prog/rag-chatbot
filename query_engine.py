@@ -244,9 +244,6 @@ def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None, vector_
             # Stale cache detected, delete it
             del _chain_cache[cache_key]
         
-    if not os.path.exists(db_dir):
-        raise FileNotFoundError(f"Qdrant DB directory not found at {db_dir}. Please run 'python ingest.py' first.")
-        
     # 1. Load local embedding model
     embeddings = HuggingFaceEmbeddings(
         model_name="Qwen/Qwen3-VL-Embedding-2B",
@@ -254,7 +251,15 @@ def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None, vector_
     )
     
     # 2. Load Qdrant DB
-    client = QdrantClient(path=db_dir)
+    try:
+        client = QdrantClient(url="http://localhost:6333", timeout=3.0)
+        client.get_collections()
+        print("Connected to standalone Qdrant server at http://localhost:6333")
+    except Exception:
+        if not os.path.exists(db_dir):
+            raise FileNotFoundError(f"Qdrant DB directory not found at {db_dir}. Please run 'python ingest.py' first.")
+        print(f"Standalone Qdrant server offline. Falling back to local db path: {db_dir}")
+        client = QdrantClient(path=db_dir)
     if not client.collection_exists("government_rules"):
         raise ValueError(f"The Qdrant collection 'government_rules' does not exist. Please run 'python ingest.py' first.")
         
