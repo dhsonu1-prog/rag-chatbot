@@ -2,13 +2,13 @@ import os
 import pickle
 from langchain_qdrant import Qdrant
 from qdrant_client import QdrantClient
+from qdrant_client import models as qdrant_models
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import OllamaLLM
 from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
-from langchain_community.retrievers import BM25Retriever
-from langchain_classic.retrievers import EnsembleRetriever
+from sparse_encoder import HashingSparseEncoder
 
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
 db_dir = os.path.join(workspace_dir, "qdrant_db")
@@ -83,6 +83,74 @@ class RerankEnsembleRetriever(BaseRetriever):
             print(f"  [Reranker Warning] Reranking failed: {e}. Falling back to default retrieval.")
             return docs[:self.top_n]
 
+class QdrantHybridRetriever(BaseRetriever):
+    client: QdrantClient
+    embeddings: HuggingFaceEmbeddings
+    sparse_encoder: HashingSparseEncoder
+    collection_name: str = "government_rules"
+    top_k: int = 20
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None
+    ) -> List[Document]:
+        # 1. Generate dense query vector
+        query_dense = self.embeddings.embed_query(query)
+        
+        # 2. Generate sparse query vector
+        query_sparse = self.sparse_encoder.encode(query)
+        
+        # 3. Query Qdrant with native prefetch and Fusion.RRF
+        if not query_sparse["indices"]:
+            # Fallback to dense only if no terms are present
+            results = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_dense,
+                limit=self.top_k
+            ).points
+        else:
+            try:
+                results = self.client.query_points(
+                    collection_name=self.collection_name,
+                    prefetch=[
+                        qdrant_models.Prefetch(
+                            query=query_dense,
+                            using="",  # default unnamed dense vector
+                            limit=self.top_k * 2
+                        ),
+                        qdrant_models.Prefetch(
+                            query=qdrant_models.SparseVector(
+                                indices=query_sparse["indices"],
+                                values=query_sparse["values"]
+                            ),
+                            using="sparse-text",
+                            limit=self.top_k * 2
+                        )
+                    ],
+                    query=qdrant_models.FusionQuery(
+                        fusion=qdrant_models.Fusion.RRF
+                    ),
+                    limit=self.top_k
+                ).points
+            except Exception as query_err:
+                print(f"  [Qdrant Hybrid Warning] Hybrid query failed: {query_err}. Falling back to dense vector search.")
+                # Fallback to dense vector if collection doesn't have sparse configured yet
+                results = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_dense,
+                    limit=self.top_k
+                ).points
+            
+        # 4. Map results to LangChain Documents
+        docs = []
+        for point in results:
+            payload = point.payload or {}
+            metadata = payload.get("metadata", {})
+            docs.append(Document(
+                page_content=payload.get("page_content", ""),
+                metadata=metadata
+            ))
+        return docs
+
 def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None, vector_weight=0.5, bm25_weight=0.5, use_reranker=True, top_n_rerank=5):
     """Initialize and return the hybrid conversational RAG chain."""
     global _chain_cache
@@ -128,64 +196,19 @@ def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None, vector_
         embeddings=embeddings
     )
     
-    # 3. Create Vector retriever
+    # 3. Create Native Qdrant Hybrid retriever (replacing Python BM25 / pkl)
     candidate_k = 20 if use_reranker else 8
-    vector_retriever = db.as_retriever(search_kwargs={"k": candidate_k})
-    
-    # 4. Load or build BM25 retriever
-    bm25_retriever = None
-    if os.path.exists(bm25_cache_path):
-        try:
-            with open(bm25_cache_path, "rb") as f:
-                bm25_retriever = pickle.load(f)
-            bm25_retriever.k = candidate_k
-        except Exception as e:
-            print(f"Warning: Failed to load BM25 cache: {e}. Rebuilding...")
-            bm25_retriever = None
-            
-    if bm25_retriever is None:
-        records = []
-        offset = None
-        while True:
-            res_scroll, next_page = client.scroll(
-                collection_name="government_rules",
-                limit=1000,
-                with_payload=True,
-                with_vectors=False,
-                offset=offset
-            )
-            records.extend(res_scroll)
-            if next_page is None:
-                break
-            offset = next_page
-            
-        docs = []
-        for rec in records:
-            payload = rec.payload or {}
-            if "page_content" in payload:
-                docs.append(Document(
-                    page_content=payload["page_content"],
-                    metadata=payload.get("metadata", {})
-                ))
-                
-        if not docs:
-            raise ValueError("The Qdrant database is currently empty. Please run ingestion first using 'python ingest.py'.")
-        bm25_retriever = BM25Retriever.from_documents(docs)
-        bm25_retriever.k = candidate_k
-        try:
-            with open(bm25_cache_path, "wb") as f:
-                pickle.dump(bm25_retriever, f)
-        except Exception as e:
-            print(f"Warning: Failed to save BM25 cache: {e}")
-            
-    # 5. Combine into Ensemble (Hybrid) retriever
-    ensemble_retriever = EnsembleRetriever(
-        retrievers=[bm25_retriever, vector_retriever],
-        weights=[bm25_weight, vector_weight]
+    sparse_encoder = HashingSparseEncoder()
+    hybrid_retriever = QdrantHybridRetriever(
+        client=client,
+        embeddings=embeddings,
+        sparse_encoder=sparse_encoder,
+        collection_name="government_rules",
+        top_k=candidate_k
     )
     
     retriever = RerankEnsembleRetriever(
-        base_retriever=ensemble_retriever,
+        base_retriever=hybrid_retriever,
         use_reranker=use_reranker,
         top_n=top_n_rerank
     )

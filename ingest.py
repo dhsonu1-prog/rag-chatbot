@@ -4,6 +4,7 @@ import json
 import time
 import base64
 import requests
+import uuid
 import fitz  # PyMuPDF for converting PDF pages to images
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
@@ -12,6 +13,44 @@ from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
+from sparse_encoder import HashingSparseEncoder
+
+sparse_encoder = HashingSparseEncoder()
+
+def add_documents_hybrid(client, embeddings, sparse_encoder, collection_name, chunks):
+    if not chunks:
+        return
+    # 1. Generate dense vectors
+    texts = [chunk.page_content for chunk in chunks]
+    dense_vectors = embeddings.embed_documents(texts)
+    
+    # 2. Map chunks to PointStructs with dual vectors (dense & sparse-text)
+    points = []
+    for doc, dense_vector in zip(chunks, dense_vectors):
+        doc_id = str(uuid.uuid4())
+        sparse_vec = sparse_encoder.encode(doc.page_content)
+        
+        points.append(
+            qdrant_models.PointStruct(
+                id=doc_id,
+                vector={
+                    "": dense_vector,  # default unnamed vector for LangChain compatibility
+                    "sparse-text": qdrant_models.SparseVector(
+                        indices=sparse_vec["indices"],
+                        values=sparse_vec["values"]
+                    )
+                },
+                payload={
+                    "page_content": doc.page_content,
+                    "metadata": doc.metadata
+                }
+            )
+        )
+    # 3. Upsert into Qdrant
+    client.upsert(
+        collection_name=collection_name,
+        points=points
+    )
 
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
 db_dir = os.path.join(workspace_dir, "qdrant_db")
@@ -205,7 +244,14 @@ def main():
                 vectors_config=qdrant_models.VectorParams(
                     size=2048,
                     distance=qdrant_models.Distance.COSINE
-                )
+                ),
+                sparse_vectors_config={
+                    "sparse-text": qdrant_models.SparseVectorParams(
+                        index=qdrant_models.SparseIndexParams(
+                            on_disk=True
+                        )
+                    )
+                }
             )
             print("  Created new Qdrant collection: 'government_rules'")
             
@@ -313,7 +359,7 @@ def main():
                 if len(all_chunks) >= 400:
                     print(f"  Writing batch of {len(all_chunks)} chunks to Qdrant DB...")
                     try:
-                        db.add_documents(all_chunks)
+                        add_documents_hybrid(client, embeddings, sparse_encoder, "government_rules", all_chunks)
                     except Exception as e:
                         print(f"  Error writing batch to Qdrant DB: {e}")
                     finally:
@@ -325,7 +371,7 @@ def main():
         if all_chunks:
             print(f"  Writing final batch of {len(all_chunks)} chunks to Qdrant DB...")
             try:
-                db.add_documents(all_chunks)
+                add_documents_hybrid(client, embeddings, sparse_encoder, "government_rules", all_chunks)
             except Exception as e:
                 print(f"Error writing final batch to Qdrant DB: {e}")
                 return
