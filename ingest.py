@@ -21,54 +21,51 @@ def add_documents_hybrid(client, embeddings, sparse_encoder, collection_name, ch
     if not chunks:
         return
     
-    # Try to generate dense vectors
     try:
+        # 1. Generate dense vectors
         texts = [chunk.page_content for chunk in chunks]
         dense_vectors = embeddings.embed_documents(texts)
-    except Exception as e:
-        if "out of memory" in str(e).lower():
-            print("  [OOM Warning] CUDA Out of Memory detected. Retrying in smaller sub-batches of 50...")
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except ImportError:
-                pass
-            
-            sub_batch_size = 50
-            for i in range(0, len(chunks), sub_batch_size):
-                sub_chunks = chunks[i:i + sub_batch_size]
-                add_documents_hybrid(client, embeddings, sparse_encoder, collection_name, sub_chunks)
-            return
-        else:
-            raise e
-    
-    # 2. Map chunks to PointStructs with dual vectors (dense & sparse-text)
-    points = []
-    for doc, dense_vector in zip(chunks, dense_vectors):
-        doc_id = str(uuid.uuid4())
-        sparse_vec = sparse_encoder.encode(doc.page_content)
         
-        points.append(
-            qdrant_models.PointStruct(
-                id=doc_id,
-                vector={
-                    "": dense_vector,  # default unnamed vector for LangChain compatibility
-                    "sparse-text": qdrant_models.SparseVector(
-                        indices=sparse_vec["indices"],
-                        values=sparse_vec["values"]
-                    )
-                },
-                payload={
-                    "page_content": doc.page_content,
-                    "metadata": doc.metadata
-                }
+        # 2. Map chunks to PointStructs with dual vectors (dense & sparse-text)
+        points = []
+        for doc, dense_vector in zip(chunks, dense_vectors):
+            doc_id = str(uuid.uuid4())
+            sparse_vec = sparse_encoder.encode(doc.page_content)
+            
+            points.append(
+                qdrant_models.PointStruct(
+                    id=doc_id,
+                    vector={
+                        "": dense_vector,  # default unnamed vector for LangChain compatibility
+                        "sparse-text": qdrant_models.SparseVector(
+                            indices=sparse_vec["indices"],
+                            values=sparse_vec["values"]
+                        )
+                    },
+                    payload={
+                        "page_content": doc.page_content,
+                        "metadata": doc.metadata
+                    }
+                )
             )
+        
+        # 3. Upsert into Qdrant
+        client.upsert(
+            collection_name=collection_name,
+            points=points
         )
-    # 3. Upsert into Qdrant
-    client.upsert(
-        collection_name=collection_name,
-        points=points
-    )
+    except Exception as e:
+        print(f"  [Write Warning] Ingestion write failed: {e}. Retrying in smaller sub-batches of 50...")
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        
+        sub_batch_size = 50
+        for i in range(0, len(chunks), sub_batch_size):
+            sub_chunks = chunks[i:i + sub_batch_size]
+            add_documents_hybrid(client, embeddings, sparse_encoder, collection_name, sub_chunks)
 
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
 db_dir = os.path.join(workspace_dir, "qdrant_db")
