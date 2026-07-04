@@ -256,10 +256,10 @@ def get_rag_chain(model_name="gemma2:9b", api_base=None, api_model=None, vector_
             # Stale cache detected, delete it
             del _chain_cache[cache_key]
         
-    # 1. Load local embedding model
+    # 1. Load local embedding model on CPU to save 5GB+ GPU VRAM (query is fast on CPU)
     embeddings = HuggingFaceEmbeddings(
         model_name="Qwen/Qwen3-VL-Embedding-2B",
-        model_kwargs={'device': 'cuda'}
+        model_kwargs={'device': 'cpu'}
     )
     
     # 2. Load Qdrant DB
