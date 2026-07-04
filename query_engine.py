@@ -9,6 +9,7 @@ from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 from sparse_encoder import HashingSparseEncoder
+import re
 
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
 db_dir = os.path.join(workspace_dir, "qdrant_db")
@@ -347,6 +348,9 @@ def query_rag(query_text, model_name="gemma2:9b", chat_history=None, api_base=No
         response = chain.invoke({"question": query_text, "chat_history": chat_history})
         
         answer = response["answer"]
+        # Strip Qwen/DeepSeek thinking blocks if present (e.g. <think>...</think>)
+        answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
+        
         source_docs = response["source_documents"]
         
         # Deduplicate sources
