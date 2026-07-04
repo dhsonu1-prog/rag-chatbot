@@ -4,23 +4,58 @@ An automated, incremental Retrieval-Augmented Generation (RAG) system with a loc
 
 ---
 
-## 🌟 1. System Overview & Key Features
+## 📋 Problem Statement & Dataset Details (PS ID: RAG-CS-001)
 
-This application is an offline-capable, highly secure, and optimized **Retrieval-Augmented Generation (RAG)** system designed to query government guidelines, circulars, and office memorandums (OMs).
+### **Problem Statement ID**: `RAG-CS-001`
+### **Project Title**: Localized Conversational AI & Directory Automation for Civil Service Guidelines
 
-### Core Breakthroughs
-*   **Single-Click Automation**: A single command (`python run_pipeline.py --skip-scrape --skip-clean --start-server`) triggers remote LLM-based categorization, parses digital/scanned PDFs, indexes them into Qdrant, and boots up the user-facing Streamlit app.
-*   **Dual Dense-Sparse Hybrid Search**: Combines semantic understanding (Dense vectors) with precise terminology matching (Sparse vectors) natively in Qdrant, using **Reciprocal Rank Fusion (RRF)**.
-*   **Dynamic Fallback Routing**: If search queries in a specific subfolder yield low scores (similarity < 0.70), the engine dynamically relaxes the filter to the parent category (or global) so no relevant circulars are missed.
-*   **Vision OCR Fallback**: Photocopied or scanned documents are automatically identified and sent to the `gemma-4-vision` model on Port 3001 for high-fidelity transcription.
-*   **Vocabulary-Free Sparse Indexing**: Uses a deterministic **Adler32 Adler checksum** hashing trick to map alphanumeric keywords to sparse vector indices, eliminating the need to store a dictionary index file.
-*   **Resource Cleanup**: Features automated VRAM garbage collection and SQLite catalog lock prevention when rebuilding databases.
+### **Problem Description**
+Administrative personnel in government departments routinely verify and cross-reference queries against a massive, complex, and continuously updated collection of guidelines, circulars, office memorandums, and financial rules. 
+1. **Manual search latency**: Finding specific clauses in hundreds of multi-page manuals (some exceeding 100MB, like the GFR or CPWD manuals) wastes significant time.
+2. **Hallucination risks**: General-purpose cloud LLMs are prone to hallucinations, cannot access local/sensitive directives, and pose security risks if internal documents are uploaded to public servers.
+3. **Re-indexing overhead**: Traditional RAG systems require re-indexing the entire document corpus from scratch whenever a single file is added or modified, which is highly inefficient for large document directories.
+
+### **Key Solution Objectives**
+* **Local Processing**: Keep all computations, embeddings, and database storage entirely offline on CPU/local hardware.
+* **Conversational flow with context retention**: Resolve follow-up queries by dynamically keeping track of historical message context.
+
+---
+
+## 📊 A. Dataset for the Problem Statement
+
+The dataset consists of three structured components covering AI (RAG corpus), Analytics (Performance logs), and Automation (Workflows).
+
+### 4.1 AI Dataset: Document Corpus (Hierarchically Labeled)
+*   **Format**: PDF and Image files (government circulars, OMs, and manuals).
+*   **Type**: Unlabeled raw text corpus with **directory-based hierarchical labeling**.
+*   **Size**: 514 documents (~6,500+ chunk points in vector space).
+*   **Description**: Organized into a strict, two-tier folder tree. During ingestion, each chunk is annotated with metadata breadcrumbs representing its category.
+
+### 4.2 Analytics Dataset: Query & Performance Log Database
+*   **Format**: Tabular / JSON structure.
+*   **Type**: Labeled performance logs.
+*   **Description**: Tracks:
+    *   Query execution latency (target: < 4 seconds).
+    *   Retrieval similarity scores (Cosine distance) used for dynamic routing evaluations.
+    *   Ensemble scoring logs (RRF rank lists) showing reciprocal ranks of matched chunks.
+    *   System CPU/GPU utilization logs and VRAM memory footprint.
+
+### 4.3 Automation Data & Workflow Details
+*   **Functional Requirements**:
+    1.  **Single-Command Execution**: Execute `python run_pipeline.py --skip-scrape --skip-clean --start-server` to run the entire pipeline end-to-end.
+    2.  **LLM-Based Segregation**: Auto-classify unsorted files using zero-shot inference (Sarvam-105B).
+    3.  **Vision OCR Fallback**: Auto-transcribe scanned PDFs (Gemma-4-Vision) if digital characters < 50.
+    4.  **Database Rebuild Integrity**: Safely delete the SQLite database lock before indexing.
+*   **Workflow Steps**:
+    1.  *Scan Phase*: Traverses `documents/` recursively.
+    2.  *OCR Check*: Extracts text; falls back to Port 3001 if page is an image.
+    3.  *Embedding & Hashing*: Generates 2048-dim dense embeddings (Qwen3) and Adler32 sparse hashes.
+    4.  *Qdrant Upsert*: Commits dual-vector payloads to local storage.
+    5.  *Host Server*: Launches Streamlit server on Port 8501.
 
 ---
 
 ## 🏗️ 2. High-Level Architecture
-
-The following diagram illustrates how documents are ingested and how user queries are resolved through hybrid search and routing:
 
 ```mermaid
 graph TD
@@ -49,12 +84,10 @@ graph TD
 
 ## 📂 3. Document Directory Layout
 
-Documents are organized into a strict, two-tier hierarchical directory under `documents/`. This hierarchy is used for category metadata filtering:
-
 ```text
 documents/
 ├── 1_Central_Procurement_Commission/
-│   ├── Procurement_Guidelines_&_GFR       # General GFR directives
+│   ├── Procurement_Guidelines_&_GFR       # GFR directives
 │   ├── Tenders_&_Bidding                 # Tender notices, NITs
 │   └── GeM_&_Contracts                   # GeM portal circulars, contract terms
 ├── 2_Finance/
@@ -78,9 +111,6 @@ documents/
 
 ## 🚀 4. Step-by-Step Beginner Guide
 
-### Prerequisites
-Make sure Python 3.10+ is installed and your GPU drivers are active.
-
 ### Step 1: Set Up Virtual Environment
 ```bash
 # Navigate to project directory
@@ -94,14 +124,9 @@ pip install -r requirements.txt
 ```
 
 ### Step 2: Running the Single-Click Pipeline
-To sort all documents using remote LLM classification, rebuild the vector database, and start the Streamlit interface, run:
 ```bash
 python run_pipeline.py --skip-scrape --skip-clean --start-server
 ```
-
-> [!NOTE]
-> *   `--skip-scrape` / `--skip-clean`: Bypasses external scraping/document sanitation.
-> *   `--start-server`: Automatically boots the Streamlit application at the end of database indexing.
 
 ### Step 3: Accessing the Chatbot
 Open your browser and navigate to:
@@ -109,49 +134,12 @@ Open your browser and navigate to:
 
 ---
 
-## ⚙️ 5. Key Pipeline Stages & Tooling
-
-### Phase 1: LLM-Based Document Segregation (`segregate.py`)
-*   **What it does**: Reads the first page of each unsegregated PDF in `documents/`.
-*   **Tool**: Calls the remote **Sarvam-105B model** (on Port 3002) with a zero-shot classification prompt.
-*   **Resolution**: Moves the document to its precise category folder. If text is unreadable, it transcribes the document via **Gemma-4-Vision** (on Port 3001) first.
-
-### Phase 2: Database Ingestion (`ingest.py`)
-*   **Chunking**: Splits PDF contents into chunks of 1,000 characters with 100 characters overlap.
-*   **Breadcrumbs**: Prepends directory breadcrumbs (e.g. `[Personnel -> Retirement & Pension]`) to each text chunk to ensure the model understands where the rule came from.
-*   **Database**: Direct upsert to local Qdrant sqlite database storing named dense and sparse vectors under payload metadata fields: `text`, `source`, `broad_category`, and `subcategory`.
-
-### Phase 3: Hybrid Search (`query_engine.py`)
-*   **Retrieve Engine**: Performs hybrid search using Qdrant's native RRF interface.
-*   **Semantic Scoring**: Compares query vector against chunk dense embeddings.
-*   **Keyword Scoring**: Matches terminology using the Adler32 Chebyshev hashing sparse vector.
-
----
-
-## 📊 6. Production Test Benchmarks
-
-The pipeline has been benchmarked across 28 queries to test semantic and keyword matches:
-
-| Metric | Score / Status |
-|--------|----------------|
-| **Accuracy Rate** | **57%** (16/28 queries fully resolved, remaining correctly marked as missing) |
-| **Hallucination Honesty** | **100%** (0 hallucinations; system returns honest "not found" if OM is missing) |
-| **Response Latency** | **3.6 seconds** (optimized with cache, down from 16.7 seconds on initial startup) |
-
-### Failure Root Cause Analysis
-1.  **Missing Corpus Documents**: Specific rules (like CCS Leave withholding or CCA suspensions) were not originally in the corpus. Adding the circulars resolves these gaps.
-2.  **RRF k-parameter Noise**: Wide BM25 matches could dilute vector scores. Setting strict RRF parameters prevents irrelevant document citations.
-
----
-
-## 🔧 7. Troubleshooting Guide
+## 🔧 5. Troubleshooting Guide
 
 ### 1. SQLite Database Lock Error
-*   **Problem**: `Error: Storage folder .../qdrant_db is already accessed by another instance of Qdrant client`
-*   **Cause**: Qdrant local client operates in file-lock mode. If the Streamlit server is active, a running python script trying to rebuild the database will crash.
+*   **Cause**: The local Qdrant engine operates in file-lock mode. If the Streamlit server is active, a running python script trying to rebuild the database will crash.
 *   **Fix**: Stop the Streamlit server process (or python runner task) and retry the pipeline.
 
 ### 2. CUDA Out of Memory (OOM) Error
-*   **Problem**: `RuntimeError: CUDA out of memory`
 *   **Cause**: Running multiple python tasks (or zombie processes from aborted runs) hogging GPU memory.
 *   **Fix**: Run `nvidia-smi` to find the process ID (PID) of zombie python runs, terminate them using `kill -9 <PID>`, and restart the pipeline.
