@@ -1,6 +1,7 @@
 import os
 import argparse
 import time
+import subprocess
 
 try:
     from scraper import run_scraper
@@ -18,11 +19,12 @@ except ImportError:
     run_ingestion = None
 
 def main():
-    parser = argparse.ArgumentParser(description="Unified RAG pipeline: Scrape, Clean, and Ingest.")
+    parser = argparse.ArgumentParser(description="Unified RAG pipeline: Scrape, Clean, Ingest, and Start Server.")
     parser.add_argument("--depth", type=int, default=2, help="Scraper crawling depth limit. Default is 2.")
     parser.add_argument("--skip-scrape", action="store_true", help="Skip crawling and downloading.")
     parser.add_argument("--skip-clean", action="store_true", help="Skip garbage cleanup and deduplication.")
     parser.add_argument("--skip-ingest", action="store_true", help="Skip database ingestion.")
+    parser.add_argument("--start-server", action="store_true", help="Automatically start the Streamlit chat server at the end.")
     args = parser.parse_args()
 
     workspace_dir = os.path.dirname(os.path.abspath(__file__))
@@ -79,6 +81,27 @@ def main():
     print("\n" + "=" * 60)
     print(f"PIPELINE EXECUTION FINISHED in {duration:.2f} seconds")
     print("=" * 60)
+
+    # ----------------------------------------------------
+    # Stage 4: Start Server
+    # ----------------------------------------------------
+    if args.start_server:
+        print("\n[Stage 4] Starting Streamlit Chat Server...")
+        try:
+            venv_bin = os.path.join(workspace_dir, ".venv", "bin")
+            if os.path.exists(venv_bin):
+                streamlit_cmd = os.path.join(venv_bin, "streamlit")
+            else:
+                streamlit_cmd = "streamlit"
+                
+            app_path = os.path.join(workspace_dir, "app.py")
+            print(f"Executing: {streamlit_cmd} run {app_path} --server.address=0.0.0.0")
+            
+            # Launch streamlit in the background and let it persist
+            process = subprocess.Popen([streamlit_cmd, "run", app_path, "--server.address=0.0.0.0"])
+            print(f"Streamlit server started successfully in the background (PID: {process.pid})!")
+        except Exception as e:
+            print(f"Error starting Streamlit server: {e}")
 
 if __name__ == "__main__":
     main()
