@@ -20,9 +20,27 @@ sparse_encoder = HashingSparseEncoder()
 def add_documents_hybrid(client, embeddings, sparse_encoder, collection_name, chunks):
     if not chunks:
         return
-    # 1. Generate dense vectors
-    texts = [chunk.page_content for chunk in chunks]
-    dense_vectors = embeddings.embed_documents(texts)
+    
+    # Try to generate dense vectors
+    try:
+        texts = [chunk.page_content for chunk in chunks]
+        dense_vectors = embeddings.embed_documents(texts)
+    except Exception as e:
+        if "out of memory" in str(e).lower():
+            print("  [OOM Warning] CUDA Out of Memory detected. Retrying in smaller sub-batches of 50...")
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except ImportError:
+                pass
+            
+            sub_batch_size = 50
+            for i in range(0, len(chunks), sub_batch_size):
+                sub_chunks = chunks[i:i + sub_batch_size]
+                add_documents_hybrid(client, embeddings, sparse_encoder, collection_name, sub_chunks)
+            return
+        else:
+            raise e
     
     # 2. Map chunks to PointStructs with dual vectors (dense & sparse-text)
     points = []
