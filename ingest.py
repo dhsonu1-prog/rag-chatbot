@@ -208,8 +208,24 @@ def main():
                 )
             )
             print("  Created new Qdrant collection: 'government_rules'")
+            
+            # Create payload indexes for fast O(1) pre-filtering
+            try:
+                client.create_payload_index(
+                    collection_name="government_rules",
+                    field_name="metadata.category",
+                    field_schema=qdrant_models.PayloadSchemaType.KEYWORD
+                )
+                client.create_payload_index(
+                    collection_name="government_rules",
+                    field_name="metadata.source",
+                    field_schema=qdrant_models.PayloadSchemaType.KEYWORD
+                )
+                print("  Payload indexes created successfully for 'category' and 'source'.")
+            except Exception as index_err:
+                print(f"  Warning: Could not create payload indexes: {index_err}")
     except Exception as e:
-        pass
+        print(f"Error initializing Qdrant database collection: {e}")
 
     db = Qdrant(
         client=client,
