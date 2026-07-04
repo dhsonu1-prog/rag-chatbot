@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--skip-scrape", action="store_true", help="Skip crawling and downloading.")
     parser.add_argument("--skip-clean", action="store_true", help="Skip garbage cleanup and deduplication.")
     parser.add_argument("--skip-ingest", action="store_true", help="Skip database ingestion.")
+    parser.add_argument("--skip-segregate", action="store_true", help="Skip LLM-based content segregation.")
     parser.add_argument("--start-server", action="store_true", help="Automatically start the Streamlit chat server at the end.")
     args = parser.parse_args()
 
@@ -34,6 +35,19 @@ def main():
     print("UNIFIED RAG CHATBOT PIPELINE AUTOMATION")
     print("=" * 60)
     start_time = time.time()
+
+    # ----------------------------------------------------
+    # Stage 0: Segregate documents using LLM
+    # ----------------------------------------------------
+    if args.skip_segregate:
+        print("\n[Stage 0] LLM segregation disabled. Skipping.")
+    else:
+        try:
+            from segregate import run_llm_segregation
+            print("\n[Stage 0] Launching LLM Document Segregation...")
+            run_llm_segregation()
+        except Exception as e:
+            print(f"Segregation error: {e}")
 
     # ----------------------------------------------------
     # Stage 1: Scrape
