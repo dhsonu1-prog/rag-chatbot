@@ -99,13 +99,61 @@ def format_source_citation(filepath):
     
     return f"📄 {category}**{display_name}**{date_str}"
 
+import requests
+from qdrant_client import QdrantClient
+
+# Helper to fetch installed Ollama models dynamically
+def get_installed_ollama_models():
+    try:
+        response = requests.get("http://localhost:11434/api/tags", timeout=1.0)
+        if response.status_code == 200:
+            data = response.json()
+            models = [m["name"] for m in data.get("models", [])]
+            if models:
+                return models
+    except Exception:
+        pass
+    return ["gemma2:9b", "gemma2:2b", "llama3.1:8b", "qwen2:7b", "llama3"]
+
+# Count files dynamically
+pdf_count = 0
+image_count = 0
+exclude_dirs = {'.git', 'venv', '.venv', 'qdrant_db', 'node_modules', '__pycache__'}
+image_extensions = ('.png', '.jpg', '.jpeg', '.tiff')
+for root, dirs, files in os.walk(workspace_dir):
+    dirs[:] = [d for d in dirs if d not in exclude_dirs]
+    for f in files:
+        ext = f.lower()
+        if ext.endswith('.pdf'):
+            pdf_count += 1
+        elif ext.endswith(image_extensions):
+            image_count += 1
+total_files = pdf_count + image_count
+
+# Check Qdrant database presence dynamically
+db_connected = False
+db_type = "Offline"
+try:
+    client = QdrantClient(url="http://localhost:6333", timeout=1.0)
+    client.get_collections()
+    db_connected = True
+    db_type = "Standalone Docker Server"
+except Exception:
+    try:
+        client = QdrantClient(path=db_dir)
+        client.get_collections()
+        db_connected = True
+        db_type = "Local SQLite Folder"
+    except Exception:
+        db_connected = False
+
 # App state initialization
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # Header UI
 st.markdown('<div class="main-title">📚 Local RAG Chatbot</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Search and consult 115 Civil Services OMs, Rules, & Guidelines 100% offline.</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="subtitle">Search and consult {total_files} Civil Services OMs, Rules, & Guidelines 100% offline.</div>', unsafe_allow_html=True)
 
 # Sidebar configurations
 with st.sidebar:
@@ -125,9 +173,10 @@ with st.sidebar:
     model_choice = "gemma2:9b"
     
     if llm_source == "Local Ollama":
+        installed_models = get_installed_ollama_models()
         model_choice = st.selectbox(
             "Choose Local LLM (Ollama)",
-            ["gemma2:9b", "gemma2:2b", "llama3.1:8b", "qwen2:7b", "llama3"],
+            installed_models,
             index=0,
             help="Make sure you have pulled this model locally using: 'ollama pull <model_name>'"
         )
@@ -154,31 +203,15 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📊 Database Status")
     
-    # Check if Chroma DB directory exists
-    db_exists = os.path.exists(db_dir)
-    if db_exists:
-        st.success("✅ Database loaded successfully")
-        # Count files dynamically
-        pdf_count = 0
-        image_count = 0
-        exclude_dirs = {'.git', 'venv', '.venv', 'qdrant_db', 'node_modules', '__pycache__'}
-        image_extensions = ('.png', '.jpg', '.jpeg', '.tiff')
-        for root, dirs, files in os.walk(workspace_dir):
-            dirs[:] = [d for d in dirs if d not in exclude_dirs]
-            for f in files:
-                ext = f.lower()
-                if ext.endswith('.pdf'):
-                    pdf_count += 1
-                elif ext.endswith(image_extensions):
-                    image_count += 1
-            
+    if db_connected:
+        st.success(f"✅ Connected to Qdrant ({db_type})")
         st.info(f"📁 PDFs: **{pdf_count}** | Images: **{image_count}**")
     else:
-        st.warning("⚠️ Database not found")
+        st.warning("⚠️ Qdrant Database offline")
         st.markdown("""
         Please build the database first by running:
         ```bash
-        python ingest.py
+        python run_pipeline.py --skip-scrape --skip-clean
         ```
         """)
         
@@ -214,8 +247,8 @@ for message in st.session_state.messages:
 if user_query := st.chat_input("Ask a question about Civil Services rules (e.g., reservation, pay scales, MACP)..."):
     
     # Check database presence
-    if not db_exists:
-        st.error("Chroma DB not found. Please run the Ingestion script first (`python ingest.py`).")
+    if not db_connected:
+        st.error("Qdrant Database not found or offline. Please build the database first by running `python run_pipeline.py --skip-scrape --skip-clean`.")
     else:
         # Display user question
         with st.chat_message("user"):

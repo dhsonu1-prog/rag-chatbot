@@ -41,14 +41,25 @@ from typing import List
 def get_reranker(model_name="Qwen/Qwen3-VL-Reranker-2B"):
     global _reranker_cache
     if model_name not in _reranker_cache:
-        print(f"Loading reranker model '{model_name}' on GPU...")
         from sentence_transformers import CrossEncoder
         import torch
-        model = CrossEncoder(
-            model_name,
-            automodel_args={"torch_dtype": torch.float16},
-            device="cuda"
-        )
+        try:
+            print(f"Loading reranker model '{model_name}' on GPU...")
+            model = CrossEncoder(
+                model_name,
+                automodel_args={"torch_dtype": torch.float16},
+                device="cuda"
+            )
+        except Exception as e:
+            print(f"  [Reranker Warning] Failed to load reranker on GPU ({e}). Falling back to CPU...")
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            model = CrossEncoder(
+                model_name,
+                device="cpu"
+            )
         _reranker_cache[model_name] = model
     return _reranker_cache[model_name]
 
